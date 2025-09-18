@@ -418,15 +418,19 @@ def main():
     if not token:
         raise ValueError("Please set TELEGRAM_BOT_TOKEN environment variable")
     
-    # Get proxy credentials from environment
+    # Get proxy configuration from environment
+    proxy_enabled = os.getenv("USE_PROXY", "true").lower() in ("true", "1", "yes", "on")
     proxy_user = os.getenv("BOTPROXY_USER")
     proxy_password = os.getenv("BOTPROXY_PASSWORD")
     
-    if proxy_user and proxy_password:
+    if proxy_enabled and proxy_user and proxy_password:
         logger.info("Using BotProxy for requests")
         bot = MunichAppointmentBot(token, proxy_user=proxy_user, proxy_password=proxy_password)
     else:
-        logger.info("No proxy credentials found, running without proxy")
+        if not proxy_enabled:
+            logger.info("Proxy disabled via USE_PROXY environment variable")
+        elif not proxy_user or not proxy_password:
+            logger.info("No proxy credentials found, running without proxy")
         bot = MunichAppointmentBot(token)
     
     bot.run()
