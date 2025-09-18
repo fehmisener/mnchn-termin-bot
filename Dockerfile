@@ -40,7 +40,7 @@ RUN playwright install chromium
 
 # Copy application code
 COPY appointment_bot.py .
-COPY README_bot.md .
+COPY README.md .
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash app && chown -R app:app /app

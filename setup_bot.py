@@ -13,7 +13,7 @@ def install_requirements():
     """Install required Python packages"""
     print("Installing Python dependencies...")
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements_bot.txt"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
         print("✅ Python dependencies installed successfully")
     except subprocess.CalledProcessError as e:
         print(f"❌ Failed to install Python dependencies: {e}")
