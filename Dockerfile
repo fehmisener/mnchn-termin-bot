@@ -36,7 +36,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Install Playwright browsers
-RUN playwright install chromium
+RUN playwright install
 
 # Copy application code
 COPY appointment_bot.py .
