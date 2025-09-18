@@ -15,8 +15,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class ProxyConfig:
+    def __init__(self, proxy_user: str, proxy_password: str, proxy_host: str = "x.botproxy.net", proxy_port: int = 8080):
+        self.proxy_user = proxy_user
+        self.proxy_password = proxy_password
+        self.proxy_host = proxy_host
+        self.proxy_port = proxy_port
+        self.proxy_url = f"http://{proxy_user}:{proxy_password}@{proxy_host}:{proxy_port}"
+    
+    def get_httpx_proxy_url(self):
+        return self.proxy_url
+    
+    def get_playwright_proxy(self):
+        return {
+            "server": f"http://{self.proxy_host}:{self.proxy_port}",
+            "username": self.proxy_user,
+            "password": self.proxy_password
+        }
+
 class MunichAppointmentBot:
-    def __init__(self, telegram_token: str):
+    def __init__(self, telegram_token: str, proxy_user: Optional[str] = None, proxy_password: Optional[str] = None):
         self.telegram_token = telegram_token
         self.application = ApplicationBuilder().token(telegram_token).build()
         self.browser: Optional[Browser] = None
@@ -26,6 +44,11 @@ class MunichAppointmentBot:
         self.is_monitoring = False
         self.monitoring_interval = 5  # Default 5 minutes
         self.chat_id: Optional[int] = None
+        
+        # Proxy configuration
+        self.proxy_config = None
+        if proxy_user and proxy_password:
+            self.proxy_config = ProxyConfig(proxy_user, proxy_password)
         
         # Munich appointment system URLs and IDs
         self.base_url = "https://www48.muenchen.de/buergeransicht/api/citizen"
@@ -167,6 +190,8 @@ Browser: {'🟢 Active' if self.browser else '🔴 Inactive'}
                 # Close current page to force fresh state
                 await self.page.close()
                 self.page = None
+                self.token_expires_at = None
+                self.current_token = None
             except Exception as e:
                 logger.debug(f"Error cleaning browser state: {e}")
     
@@ -192,19 +217,35 @@ Browser: {'🟢 Active' if self.browser else '🔴 Inactive'}
                 await asyncio.sleep(self.monitoring_interval * 60)
                 
             except Exception as e:
-                logger.error(f"Error in monitoring loop: {e}")
-                if self.chat_id:
-                    await self.application.bot.send_message(
-                        chat_id=self.chat_id,
-                        text=f"❌ Monitoring error: {str(e)}"
-                    )
-                await asyncio.sleep(60)  # Wait 1 minute before retrying
+                error_message = str(e)
+                logger.error(f"Error in monitoring loop: {error_message}")
+                
+                # Check if this is a recoverable captcha token error
+                if "Invalid captcha token" in error_message or "captcha" in error_message.lower():
+                    logger.info("Captcha token error detected - browser state cleaned, continuing monitoring...")
+                    # Short wait before retrying
+                    await asyncio.sleep(30)
+                else:
+                    # For other errors, notify and wait longer
+                    if self.chat_id:
+                        await self.application.bot.send_message(
+                            chat_id=self.chat_id,
+                            text=f"❌ Monitoring error: {error_message}"
+                        )
+                    await asyncio.sleep(60)  # Wait 1 minute before retrying
     
     async def _init_browser(self):
         """Initialize Playwright browser"""
         if not self.browser:
             playwright = await async_playwright().start()
-            self.browser = await playwright.chromium.launch(headless=True)
+            
+            # Configure browser launch options with proxy if available
+            # Use headless=False when using proxy to avoid bot detection
+            launch_options = {"headless": False }
+            if self.proxy_config:
+                launch_options["proxy"] = self.proxy_config.get_playwright_proxy()
+            
+            self.browser = await playwright.chromium.launch(**launch_options)
         
         # Always create a new page for fresh captcha solving
         if self.page:
@@ -283,6 +324,15 @@ Browser: {'🟢 Active' if self.browser else '🔴 Inactive'}
                 raise Exception("Could not extract captcha token after solving")
     
     
+    async def _get_current_ip(self, client) -> str:
+        """Get current IP address for logging"""
+        try:
+            response = await client.get("https://httpbin.org/ip", timeout=10.0)
+            ip_data = response.json()
+            return ip_data.get("origin", "unknown")
+        except Exception:
+            return "unknown"
+    
     async def _check_appointments(self) -> Optional[str]:
         """Check for appointment availability"""
         try:
@@ -306,7 +356,18 @@ Browser: {'🟢 Active' if self.browser else '🔴 Inactive'}
                 'captchaToken': self.current_token
             }
             
-            async with httpx.AsyncClient() as client:
+            # Create httpx client with proxy if configured
+            client_kwargs = {}
+            if self.proxy_config:
+                client_kwargs['proxy'] = self.proxy_config.get_httpx_proxy_url()
+                # Keep SSL verification enabled - BotProxy should handle SSL properly
+            
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                # Log current IP address for monitoring
+                current_ip = await self._get_current_ip(client)
+                proxy_status = "via proxy" if self.proxy_config else "direct connection"
+                logger.info(f"Making appointment request from IP: {current_ip} ({proxy_status})")
+                
                 response = await client.get(url, headers=self.headers, params=params)
                 data = response.json()
                 
@@ -324,6 +385,10 @@ Browser: {'🟢 Active' if self.browser else '🔴 Inactive'}
                     
         except Exception as e:
             logger.error(f"Error checking appointments: {e}")
+            await self._cleanup_browser_state()
+            
+            # For single checks, re-raise the exception
+            # For monitoring, we'll handle this in the monitoring loop
             raise
     
     def run(self):
@@ -338,12 +403,24 @@ Browser: {'🟢 Active' if self.browser else '🔴 Inactive'}
                 asyncio.run(self.browser.close())
 
 def main():
+    import os
+    
     # Get Telegram bot token from environment
-    token = "8302207568:AAHihP2Ak_TXpMR8HLrhubGUwZYtw1AUZ2s"
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "8302207568:AAHihP2Ak_TXpMR8HLrhubGUwZYtw1AUZ2s")
     if not token:
         raise ValueError("Please set TELEGRAM_BOT_TOKEN environment variable")
     
-    bot = MunichAppointmentBot(token)
+    # Get proxy credentials from environment
+    proxy_user = os.getenv("BOTPROXY_USER")
+    proxy_password = os.getenv("BOTPROXY_PASSWORD")
+    
+    if proxy_user and proxy_password:
+        logger.info("Using BotProxy for requests")
+        bot = MunichAppointmentBot(token, proxy_user=proxy_user, proxy_password=proxy_password)
+    else:
+        logger.info("No proxy credentials found, running without proxy")
+        bot = MunichAppointmentBot(token)
+    
     bot.run()
 
 if __name__ == "__main__":
