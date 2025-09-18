@@ -249,7 +249,7 @@ Browser: {'🟢 Active' if self.browser else '🔴 Inactive'}
             
             # Configure browser launch options with proxy if available
             # Use headless=False when using proxy to avoid bot detection
-            launch_options = {"headless": False }
+            launch_options = {"headless": True }
             if self.proxy_config:
                 launch_options["proxy"] = self.proxy_config.get_playwright_proxy()
             
